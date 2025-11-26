@@ -250,3 +250,68 @@ pub fn load_longterm_signing(prefix: &str) -> Result<LongTermSigning, Box<dyn Er
         pk_b64,
     })
 }
+
+#[derive(Clone)]
+pub struct PeerSigning {
+    pub verifying: VerifyingKey,
+    pub pk_b64: String,
+}
+
+/// 從本地檔案載入「對方」的簽名公鑰（Base64 文字檔），檔名格式：`{prefix}_peer_ed25519_public.b64`
+pub fn load_peer_signing(prefix: &str) -> Result<PeerSigning, Box<dyn Error>> {
+    let path = format!("{prefix}_peer_ed25519_public.b64");
+    let content = std::fs::read_to_string(&path)?;
+    let pk_b64 = content.trim();
+    let pk_bytes = decode_b64(pk_b64)?;
+    if pk_bytes.len() != 32 {
+        return Err(format!(
+            "peer public key file `{}` must decode to 32 bytes, got {} bytes",
+            path,
+            pk_bytes.len()
+        )
+        .into());
+    }
+    let mut pk_arr = [0u8; 32];
+    pk_arr.copy_from_slice(&pk_bytes);
+    let verifying = VerifyingKey::from_bytes(&pk_arr)
+        .map_err(|e| format!("parse peer signing public key: {e}"))?;
+
+    Ok(PeerSigning {
+        verifying,
+        pk_b64: pk_b64.to_string(),
+    })
+}
+
+/// 將使用者輸入的 Base64 公鑰字串儲存到本地檔案，並回傳解析後的 PeerSigning。
+pub fn save_peer_signing_from_b64(
+    prefix: &str,
+    pk_b64_raw: &str,
+) -> Result<PeerSigning, Box<dyn Error>> {
+    let pk_b64 = pk_b64_raw.trim();
+    if pk_b64.is_empty() {
+        return Err("peer public key Base64 is empty".into());
+    }
+
+    let pk_bytes = decode_b64(pk_b64)
+        .map_err(|e| format!("decode peer public key base64: {e}"))?;
+    if pk_bytes.len() != 32 {
+        return Err(format!(
+            "peer public key must decode to 32 bytes, got {} bytes",
+            pk_bytes.len()
+        )
+        .into());
+    }
+    let mut pk_arr = [0u8; 32];
+    pk_arr.copy_from_slice(&pk_bytes);
+    let verifying = VerifyingKey::from_bytes(&pk_arr)
+        .map_err(|e| format!("parse peer signing public key: {e}"))?;
+
+    let path = format!("{prefix}_peer_ed25519_public.b64");
+    let mut f = File::create(&path)?;
+    writeln!(f, "{}", pk_b64)?;
+
+    Ok(PeerSigning {
+        verifying,
+        pk_b64: pk_b64.to_string(),
+    })
+}

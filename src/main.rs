@@ -18,7 +18,8 @@ use crypto::{
     handshake_message_from_parts, parse_handshake_message, sign_ephemeral,
     verify_ephemeral_signature, DhKeyPair, HandshakeMessage,
     generate_and_save_signing_key_pair_with_prefix, LongTermSigning,
-    load_longterm_signing,
+    PeerSigning, load_longterm_signing, load_peer_signing,
+    save_peer_signing_from_b64,
 };
 use serde::Deserialize;
 
@@ -28,6 +29,7 @@ struct AppState {
     dh_keys: Arc<Mutex<Option<DhKeyPair>>>,
     last_offer: Arc<Mutex<Option<HandshakeMessage>>>,
     longterm_signing: LongTermSigning,
+    peer_signing: Arc<Mutex<Option<PeerSigning>>>,
 }
 
 #[tokio::main]
@@ -60,11 +62,26 @@ async fn main() {
         }
     };
 
+    let peer_signing = match load_peer_signing(prefix) {
+        Ok(p) => {
+            println!("已載入對方的簽名公鑰（Base64）自 {prefix}_peer_ed25519_public.b64");
+            Some(p)
+        }
+        Err(e) => {
+            println!(
+                "尚未設定對方的簽名公鑰或讀取失敗：{e}\n\
+請在網頁上貼上對方的簽名公鑰（Base64），我們會將其儲存到 {prefix}_peer_ed25519_public.b64。"
+            );
+            None
+        }
+    };
+
     let state = AppState {
         role: role.clone(),
         dh_keys: Arc::new(Mutex::new(None)),
         last_offer: Arc::new(Mutex::new(None)),
         longterm_signing,
+        peer_signing: Arc::new(Mutex::new(peer_signing)),
     };
 
     let app = Router::new()
@@ -72,6 +89,7 @@ async fn main() {
         .route("/generate", post(generate_offer))
         .route("/download-offer.json", get(download_offer))
         .route("/process", post(process_response))
+        .route("/peer-key", post(update_peer_key))
         .with_state(state);
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -99,6 +117,14 @@ async fn index(State(state): State<AppState>) -> Html<String> {
 
     let pk_b64 = &state.longterm_signing.pk_b64;
     let sk_preview = mask_secret_preview(&state.longterm_signing.sk_b64);
+    let peer_pk_b64_opt: Option<String> = {
+        let guard = state.peer_signing.lock().unwrap();
+        guard.as_ref().map(|p| p.pk_b64.clone())
+    };
+    let peer_pk_display = peer_pk_b64_opt
+        .as_deref()
+        .unwrap_or("（尚未設定對方簽名公鑰）");
+    let peer_pk_b64_opt_text = peer_pk_b64_opt.clone().unwrap_or_default();
 
     let body = format!(
         r#"<!doctype html>
@@ -127,6 +153,22 @@ async fn index(State(state): State<AppState>) -> Html<String> {
     <pre>{pk_b64}</pre>
     <p><strong>簽名私鑰 (Base64, 只顯示頭尾，中間以星號遮蔽)：</strong></p>
     <pre>{sk_preview}</pre>
+  </section>
+  <section>
+    <h2>Step 0.5: 對方 ({peer_label}) 的簽名公鑰 (Ed25519)</h2>
+    <p>
+      為了防止中間人攻擊，建議你先在安全通道（例如當面或透過已驗證的管道）
+      取得對方 ({peer_label}) 的簽名公鑰 Base64，貼在下方並儲存。之後每次握手時，
+      我們會優先使用這個預先設定的公鑰驗證 JSON 裡的簽名，同時檢查 JSON 內附的公鑰是否一致。
+    </p>
+    <p><strong>目前儲存的對方簽名公鑰 (Base64)：</strong></p>
+    <pre>{peer_pk_display}</pre>
+    <form id="peer-key-form">
+      <label for="peer-key-input"><strong>貼上 / 更新 對方 ({peer_label}) 的簽名公鑰 (Base64)：</strong></label><br>
+      <textarea id="peer-key-input" name="peer_key_b64" placeholder="在這裡貼上對方的簽名公鑰 Base64">{peer_pk_b64_opt_text}</textarea><br>
+      <button type="submit">儲存對方簽名公鑰</button>
+    </form>
+    <pre id="peer-key-result"></pre>
   </section>
   <p>
     建議：開兩個 terminal 視窗，分別執行
@@ -190,6 +232,19 @@ cargo run -- bob      # 會在 127.0.0.1:3001 上開啟 Bob
       const text = await res.text();
       document.getElementById('result').textContent = text;
     }});
+
+    document.getElementById('peer-key-form').addEventListener('submit', async (e) => {{
+      e.preventDefault();
+      const textarea = document.getElementById('peer-key-input');
+      const key_b64 = textarea.value || '';
+      const res = await fetch('/peer-key', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ key_b64 }})
+      }});
+      const text = await res.text();
+      document.getElementById('peer-key-result').textContent = text;
+    }});
   </script>
 </body>
 </html>
@@ -251,6 +306,11 @@ struct ProcessRequest {
     json: String,
 }
 
+#[derive(Deserialize)]
+struct UpdatePeerKeyRequest {
+    key_b64: String,
+}
+
 async fn process_response(
     State(state): State<AppState>,
     Json(payload): Json<ProcessRequest>,
@@ -277,12 +337,38 @@ async fn process_response(
         }
     };
 
-    if let Err(e) = verify_ephemeral_signature(&their_verify, &their_msg.ephemeral_public_dec, &their_sig) {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!("驗證對方簽名失敗: {e}"),
-        )
-            .into_response();
+    // 先嘗試使用預先設定的對方簽名公鑰驗證（若有），並同時檢查 JSON 內附的公鑰是否一致；
+    // 若尚未預先設定，則退回使用 JSON 內附的簽名公鑰驗證。
+    {
+        let peer_opt = state.peer_signing.lock().unwrap().clone();
+        if let Some(peer) = peer_opt {
+            // 如果 JSON 內附的簽名公鑰與預先設定的不一致，視為潛在中間人攻擊。
+            if peer.pk_b64 != their_msg.signing_public_b64 {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "JSON 內附的簽名公鑰與本地預先設定的對方公鑰不一致，可能存在中間人攻擊。".to_string(),
+                )
+                    .into_response();
+            }
+
+            if let Err(e) =
+                verify_ephemeral_signature(&peer.verifying, &their_msg.ephemeral_public_dec, &their_sig)
+            {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("使用預先設定的對方簽名公鑰驗證失敗: {e}"),
+                )
+                    .into_response();
+            }
+        } else if let Err(e) =
+            verify_ephemeral_signature(&their_verify, &their_msg.ephemeral_public_dec, &their_sig)
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("尚未設定對方簽名公鑰，且使用 JSON 內附公鑰驗證失敗: {e}"),
+            )
+                .into_response();
+        }
     }
 
     let my_dh = {
@@ -326,4 +412,33 @@ fn mask_secret_preview(full_b64: &str) -> String {
     let head = &full_b64[..8];
     let tail = &full_b64[len - 8..];
     format!("{head}**********{tail}")
+}
+
+async fn update_peer_key(
+    State(state): State<AppState>,
+    Json(payload): Json<UpdatePeerKeyRequest>,
+) -> impl IntoResponse {
+    let prefix = if state.role == "alice" { "alice" } else { "bob" };
+
+    let peer = match save_peer_signing_from_b64(prefix, &payload.key_b64) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("儲存對方簽名公鑰失敗：{e}"),
+            )
+                .into_response()
+        }
+    };
+
+    {
+        let mut guard = state.peer_signing.lock().unwrap();
+        *guard = Some(peer);
+    }
+
+    (
+        StatusCode::OK,
+        "已更新並儲存對方簽名公鑰（Base64）。之後握手會優先使用此公鑰驗證。".to_string(),
+    )
+        .into_response()
 }
