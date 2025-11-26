@@ -14,7 +14,7 @@ use axum::{
     Json, Router,
 };
 use crypto::{
-    compute_shared_secret, generate_dh_keypair,
+    compute_shared_secret, derive_aes256_key, encode_b64, generate_dh_keypair,
     handshake_message_from_parts, parse_handshake_message, sign_ephemeral,
     verify_ephemeral_signature, DhKeyPair, HandshakeMessage,
     generate_and_save_signing_key_pair_with_prefix, LongTermSigning,
@@ -300,9 +300,19 @@ async fn process_response(
 
     let shared = compute_shared_secret(&my_dh.secret, &their_eph_pub);
     let shared_hex = shared.to_str_radix(16);
+    let aes_key = derive_aes256_key(&shared);
+    let aes_hex = aes_key.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    let aes_b64 = encode_b64(&aes_key);
 
     let response = format!(
-        "對方身份簽名驗證成功。\n共享密鑰 (hex): {shared_hex}\n\n提醒：雙方各自計算的共享密鑰應該一致。你可以在 Alice / Bob 兩邊各自貼上對方 JSON，比對這裡顯示的 hex 是否一樣。"
+        "對方身份簽名驗證成功。\n\
+共享大整數密鑰 (hex): {shared_hex}\n\
+\n\
+從共享密鑰經 HKDF-SHA256 推導出的 AES‑256 key：\n\
+  - AES key (hex):  {aes_hex}\n\
+  - AES key (Base64): {aes_b64}\n\
+\n\
+提醒：雙方各自計算的共享密鑰（以及導出的 AES key）應該一致。你可以在 Alice / Bob 兩邊各自貼上對方 JSON，比對這裡顯示的值是否一樣。"
     );
 
     (StatusCode::OK, response).into_response()

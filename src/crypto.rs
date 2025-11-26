@@ -1,9 +1,11 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::{Signer, SigningKey, Signature, Verifier, VerifyingKey};
+use hkdf::Hkdf;
 use num_bigint::{BigUint, RandBigInt};
 use num_traits::{One, Zero};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::convert::TryInto;
 use std::error::Error;
 use std::fs::File;
@@ -109,6 +111,18 @@ pub fn encode_b64(data: &[u8]) -> String {
 
 pub fn decode_b64(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
     STANDARD.decode(s)
+}
+
+/// 使用 HKDF-SHA256 從共享的大整數秘密推導出 32 bytes AES-256 key。
+pub fn derive_aes256_key(shared: &BigUint) -> [u8; 32] {
+    let ikm = shared.to_bytes_be();
+    let salt = b"full-DH-with-sign hkdf salt";
+    let info = b"dh-shared-to-aes-256";
+    let hk = Hkdf::<Sha256>::new(Some(salt), &ikm);
+    let mut okm = [0u8; 32];
+    hk.expand(info, &mut okm)
+        .expect("HKDF expand for AES-256 key should not fail");
+    okm
 }
 
 // 以前為 X25519 寫的 bytes <-> decimal 轉換不再需要，
