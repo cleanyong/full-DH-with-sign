@@ -38,3 +38,13 @@ cargo run -- bob
 或者
 
 ./target/debug/full-DH-with-sign bob
+
+# screen shots
+
+<img width="817" height="900" alt="image" src="https://github.com/user-attachments/assets/d17911da-4d6a-44bc-acf2-11c33665e227" />
+
+
+
+<img width="789" height="919" alt="image" src="https://github.com/user-attachments/assets/b924eed0-9317-43e0-89ce-9538dcfae1d2" />
+
+
