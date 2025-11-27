@@ -7,7 +7,7 @@ https://youtu.be/gKm0tDoyAJc?si=onybj6DbPapgZRDC
 
 
 # build and install
-- install Rust first
+- install Rust first, if you are using Windows, I guess, you need to install MSVC+win SDK
 - git clone this repo
 - cargo build --release
 - cargo install --path .
